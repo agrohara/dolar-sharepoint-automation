@@ -26,11 +26,12 @@ jobs:
     - name: 🔧 Instalar CLI Microsoft 365
       run: npm install -g @pnp/cli-microsoft365
     
-    - name: 🔑 Login no Microsoft 365
+    - name: 🔑 Login no Microsoft 365 (Client Secret)
       env:
-        ADMIN_USERNAME: ${{ secrets.ADMIN_USERNAME }}
-        ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
-      run: m365 login --authType password --userName $ADMIN_USERNAME --password $ADMIN_PASSWORD
+        CLIENT_ID: ${{ secrets.CLIENT_ID }}
+        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+        TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
+      run: m365 login --authType secret --appId $CLIENT_ID --tenant $TENANT_ID --secret $CLIENT_SECRET
     
     - name: 💵 Executar script de cotação
       env:
