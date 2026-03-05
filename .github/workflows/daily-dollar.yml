@@ -1,8 +1,6 @@
 name: Buscar Cotação do Dólar Diariamente
 
 on:
-  schedule:
-    - cron: '0 10 * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,18 +24,30 @@ jobs:
     - name: 🔧 Instalar CLI Microsoft 365
       run: npm install -g @pnp/cli-microsoft365
     
-    - name: 🔑 Login no Microsoft 365
+    - name: 🔍 DIAGNÓSTICO - Listar todos os secrets
       env:
         CLIENT_ID: ${{ secrets.CLIENT_ID }}
         CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
-      run: m365 login --authType secret --appId $CLIENT_ID --tenant $TENANT_ID --secret $CLIENT_SECRET
+      run: |
+        echo "Verificando se as variáveis estão sendo passadas:"
+        echo "CLIENT_ID está definido? ${{ secrets.CLIENT_ID != '' && 'SIM' || 'NÃO' }}"
+        echo "CLIENT_SECRET está definido? ${{ secrets.CLIENT_SECRET != '' && 'SIM' || 'NÃO' }}"
+        echo "TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c"
+    
+    - name: 🔑 Tentar login
+      env:
+        CLIENT_ID: ${{ secrets.CLIENT_ID }}
+        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
+        TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
+      run: |
+        m365 login --authType secret --appId $CLIENT_ID --tenant $TENANT_ID --secret $CLIENT_SECRET || echo "FALHA NO LOGIN"
     
     - name: 💵 Executar script de cotação
       env:
         SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
         SHAREPOINT_LIST_NAME: ${{ secrets.SHAREPOINT_LIST_NAME }}
-      run: python scripts/fetch_dollar.py
+      run: python scripts/fetch_dollar.py || echo "FALHA NO SCRIPT"
     
     - name: 🔓 Logout
       if: always()
