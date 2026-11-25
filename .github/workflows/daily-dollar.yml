@@ -1,54 +1,57 @@
 name: Buscar Cotação do Dólar Diariamente
 
 on:
+  schedule:
+    # 22:00 UTC = 19:00 (horário de Brasília), dias úteis (seg-sex).
+    # Roda após o fechamento do câmbio, garantindo a cotação do próprio dia.
+    - cron: '0 22 * * 1-5'
   workflow_dispatch:
+    inputs:
+      backfill_start:
+        description: 'Backfill - data inicial (YYYY-MM-DD). Vazio = modo diário.'
+        required: false
+        default: ''
+      backfill_end:
+        description: 'Backfill - data final (YYYY-MM-DD). Vazio = hoje.'
+        required: false
+        default: ''
 
 jobs:
   fetch-dollar:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: 📥 Checkout do repositório
-      uses: actions/checkout@v3
-    
-    - name: 🐍 Configurar Python
-      uses: actions/setup-python@v4
+    - name: Checkout do repositório
+      uses: actions/checkout@v4
+
+    - name: Configurar Python
+      uses: actions/setup-python@v5
       with:
-        python-version: '3.10'
-    
-    - name: 📦 Instalar dependências Python
+        python-version: '3.11'
+
+    - name: Instalar dependências Python
       run: |
         python -m pip install --upgrade pip
         pip install requests
-    
-    - name: 🔧 Instalar CLI Microsoft 365
+
+    - name: Instalar CLI Microsoft 365
       run: npm install -g @pnp/cli-microsoft365
-    
-    - name: 🔍 DIAGNÓSTICO - Listar todos os secrets
+
+    - name: Login no Microsoft 365
       env:
         CLIENT_ID: ${{ secrets.CLIENT_ID }}
         CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
-      run: |
-        echo "Verificando se as variáveis estão sendo passadas:"
-        echo "CLIENT_ID está definido? ${{ secrets.CLIENT_ID != '' && 'SIM' || 'NÃO' }}"
-        echo "CLIENT_SECRET está definido? ${{ secrets.CLIENT_SECRET != '' && 'SIM' || 'NÃO' }}"
-        echo "TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c"
-    
-    - name: 🔑 Tentar login
-      env:
-        CLIENT_ID: ${{ secrets.CLIENT_ID }}
-        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-        TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
-      run: |
-        m365 login --authType secret --appId $CLIENT_ID --tenant $TENANT_ID --secret $CLIENT_SECRET || echo "FALHA NO LOGIN"
-    
-    - name: 💵 Executar script de cotação
+      run: m365 login --authType secret --appId "$CLIENT_ID" --tenant "$TENANT_ID" --secret "$CLIENT_SECRET"
+
+    - name: Executar script de cotação
       env:
         SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
         SHAREPOINT_LIST_NAME: ${{ secrets.SHAREPOINT_LIST_NAME }}
-      run: python scripts/fetch_dollar.py || echo "FALHA NO SCRIPT"
-    
-    - name: 🔓 Logout
+        BACKFILL_START: ${{ github.event.inputs.backfill_start }}
+        BACKFILL_END: ${{ github.event.inputs.backfill_end }}
+      run: python scripts/fetch_dollar.py
+
+    - name: Logout
       if: always()
       run: m365 logout
