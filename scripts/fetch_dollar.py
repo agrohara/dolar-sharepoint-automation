@@ -1,115 +1,148 @@
 #!/usr/bin/env python3
 """
-Busca a cotação do dólar (série 10813 do Banco Central - dólar comercial venda)
-e grava numa lista do SharePoint usando a CLI do Microsoft 365 (m365).
+Busca a cotacao do dolar (serie 10813 do Banco Central - dolar comercial venda)
+e grava numa lista do SharePoint usando a Microsoft Graph API (autenticacao
+app-only por client secret).
 
-Modos de execução:
-  * Diário (padrão): busca a janela dos últimos dias e grava o que ainda não
-    existir na lista (cobre feriados e dias sem rodar).
-  * Backfill: defina a variável de ambiente BACKFILL_START (YYYY-MM-DD) e,
-    opcionalmente, BACKFILL_END (YYYY-MM-DD; vazio = hoje). O script percorre
-    todo o período e grava cada dia útil que ainda não estiver na lista.
+Variaveis de ambiente obrigatorias:
+  TENANT_ID, CLIENT_ID, CLIENT_SECRET   -> autenticacao no Graph
+  SHAREPOINT_SITE_URL                   -> ex.: https://contoso.sharepoint.com/sites/Financeiro
+  SHAREPOINT_LIST_NAME                  -> nome (displayName) da lista
 
-Em ambos os modos há deduplicação: datas já presentes na lista são puladas,
-então rodar de novo nunca cria duplicados.
+Modos de execucao:
+  * Diario (padrao): janela dos ultimos dias; grava o que ainda nao existir.
+  * Backfill: definindo BACKFILL_START (YYYY-MM-DD) e, opcionalmente,
+    BACKFILL_END (YYYY-MM-DD; vazio = hoje), percorre todo o periodo.
+
+Em ambos os modos ha deduplicacao: datas ja presentes na lista sao puladas,
+entao rodar de novo nunca cria duplicados.
 """
-import json
 import os
-import subprocess
 import sys
 from datetime import date, datetime, timedelta
+from urllib.parse import urlparse
 
 import requests
 
-BCB_SERIE = "10813"  # Dólar comercial (venda) - diário
+BCB_SERIE = "10813"  # Dolar comercial (venda) - diario
 FONTE = "Banco Central - API"
+GRAPH = "https://graph.microsoft.com/v1.0"
 
 
-def _bcb_url(inicio: date, fim: date) -> str:
-    return (
+# --------------------------------------------------------------------------- #
+# Banco Central
+# --------------------------------------------------------------------------- #
+def buscar_periodo(inicio: date, fim: date):
+    """Retorna lista de {'data': 'dd/mm/aaaa', 'valor': float} do BCB."""
+    url = (
         f"https://api.bcb.gov.br/dados/serie/bcdata.sgs.{BCB_SERIE}/dados"
         f"?formato=json"
         f"&dataInicial={inicio.strftime('%d/%m/%Y')}"
         f"&dataFinal={fim.strftime('%d/%m/%Y')}"
     )
-
-
-def buscar_periodo(inicio: date, fim: date):
-    """Retorna lista de {'data': 'dd/mm/aaaa', 'valor': float} do BCB."""
-    resp = requests.get(_bcb_url(inicio, fim), timeout=60)
+    resp = requests.get(url, timeout=60)
     resp.raise_for_status()
-    dados = resp.json()
-    cotacoes = []
-    for item in dados:
-        cotacoes.append(
-            {"data": item["data"], "valor": float(str(item["valor"]).replace(",", "."))}
-        )
-    return cotacoes
+    return [
+        {"data": item["data"], "valor": float(str(item["valor"]).replace(",", "."))}
+        for item in resp.json()
+    ]
+
+
+# --------------------------------------------------------------------------- #
+# Microsoft Graph
+# --------------------------------------------------------------------------- #
+def obter_token(tenant: str, client_id: str, client_secret: str) -> str:
+    url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+    dados = {
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials",
+    }
+    resp = requests.post(url, data=dados, timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Falha ao obter token do Graph: {resp.status_code} {resp.text}")
+    return resp.json()["access_token"]
+
+
+def resolver_site(sess: requests.Session, site_url: str) -> str:
+    """Resolve o siteId a partir da URL do site."""
+    p = urlparse(site_url)
+    host = p.netloc
+    caminho = p.path.rstrip("/")
+    resp = sess.get(f"{GRAPH}/sites/{host}:{caminho}", timeout=60)
+    if resp.status_code != 200:
+        raise RuntimeError(f"Falha ao resolver o site '{site_url}': {resp.status_code} {resp.text}")
+    return resp.json()["id"]
+
+
+def resolver_lista(sess: requests.Session, site_id: str, nome: str) -> str:
+    resp = sess.get(
+        f"{GRAPH}/sites/{site_id}/lists",
+        params={"$filter": f"displayName eq '{nome}'", "$select": "id,displayName"},
+        timeout=60,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Falha ao listar listas do site: {resp.status_code} {resp.text}")
+    itens = resp.json().get("value", [])
+    if not itens:
+        raise RuntimeError(f"Lista '{nome}' nao encontrada no site.")
+    return itens[0]["id"]
+
+
+def datas_existentes(sess: requests.Session, site_id: str, list_id: str) -> set:
+    """Datas (dd/mm/aaaa) ja gravadas na lista, para deduplicar."""
+    datas = set()
+    url = f"{GRAPH}/sites/{site_id}/lists/{list_id}/items"
+    params = {"$expand": "fields($select=DataCotacao)", "$top": "5000"}
+    while url:
+        resp = sess.get(url, params=params, timeout=120)
+        if resp.status_code != 200:
+            print(f"AVISO: falha ao listar itens existentes: {resp.status_code} {resp.text}")
+            return datas
+        corpo = resp.json()
+        for item in corpo.get("value", []):
+            valor = (item.get("fields") or {}).get("DataCotacao")
+            if valor:
+                datas.add(_normalizar_data(valor))
+        url = corpo.get("@odata.nextLink")
+        params = None  # o nextLink ja traz os parametros
+    return datas
 
 
 def _normalizar_data(valor: str) -> str:
-    """Converte qualquer formato devolvido pelo SharePoint para dd/mm/aaaa."""
+    """Converte qualquer formato devolvido pelo Graph para dd/mm/aaaa."""
     valor = str(valor).strip()
-    # tenta pegar só a parte da data em ISO (ex.: 2026-03-05T00:00:00Z)
-    candidatos = (valor[:10], valor)
-    for bruto in candidatos:
+    for bruto in (valor[:10], valor):
         for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y"):
             try:
                 return datetime.strptime(bruto, fmt).strftime("%d/%m/%Y")
             except ValueError:
                 continue
-    return valor  # devolve como veio se não reconhecer
+    return valor
 
 
-def datas_existentes(site_url: str, lista: str) -> set:
-    """Datas (dd/mm/aaaa) já gravadas na lista, para deduplicar."""
-    cmd = [
-        "m365", "spo", "listitem", "list",
-        "--webUrl", site_url,
-        "--listTitle", lista,
-        "--fields", "DataCotacao",
-        "--output", "json",
-    ]
-    try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-    except Exception as exc:  # noqa: BLE001
-        print(f"AVISO: nao foi possivel consultar itens existentes ({exc}).")
-        return set()
-    if res.returncode != 0:
-        print(f"AVISO: falha ao listar itens existentes: {res.stderr.strip()}")
-        return set()
-    try:
-        itens = json.loads(res.stdout or "[]")
-    except json.JSONDecodeError:
-        print("AVISO: resposta da listagem nao e JSON valido.")
-        return set()
-    return {
-        _normalizar_data(it["DataCotacao"])
-        for it in itens
-        if it.get("DataCotacao")
-    }
-
-
-def gravar_item(site_url: str, lista: str, cotacao: dict) -> None:
-    """Adiciona uma cotação na lista. Lança erro se o m365 falhar."""
+def gravar_item(sess: requests.Session, site_id: str, list_id: str, cotacao: dict) -> None:
     data_coleta = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    cmd = [
-        "m365", "spo", "listitem", "add",
-        "--webUrl", site_url,
-        "--listTitle", lista,
-        "--Title", f"Cotacao {cotacao['data']}",
-        "--DataCotacao", cotacao["data"],
-        "--Valor", str(cotacao["valor"]),
-        "--Fonte", FONTE,
-        "--DataColeta", data_coleta,
-    ]
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-    if res.returncode != 0:
+    payload = {
+        "fields": {
+            "Title": f"Cotacao {cotacao['data']}",
+            "DataCotacao": cotacao["data"],
+            "Valor": cotacao["valor"],
+            "Fonte": FONTE,
+            "DataColeta": data_coleta,
+        }
+    }
+    resp = sess.post(
+        f"{GRAPH}/sites/{site_id}/lists/{list_id}/items", json=payload, timeout=60
+    )
+    if resp.status_code not in (200, 201):
         raise RuntimeError(
-            f"Erro ao gravar {cotacao['data']}: {res.stderr.strip() or res.stdout.strip()}"
+            f"Erro ao gravar {cotacao['data']}: {resp.status_code} {resp.text}"
         )
 
 
+# --------------------------------------------------------------------------- #
 def _data_env(nome: str):
     valor = (os.environ.get(nome) or "").strip()
     if not valor:
@@ -122,10 +155,24 @@ def _data_env(nome: str):
 
 
 def main() -> None:
+    tenant = os.environ.get("TENANT_ID")
+    client_id = os.environ.get("CLIENT_ID")
+    client_secret = os.environ.get("CLIENT_SECRET")
     site_url = os.environ.get("SHAREPOINT_SITE_URL")
     lista = os.environ.get("SHAREPOINT_LIST_NAME")
-    if not site_url or not lista:
-        print("ERRO: SHAREPOINT_SITE_URL e SHAREPOINT_LIST_NAME sao obrigatorios.")
+    faltando = [
+        n
+        for n, v in (
+            ("TENANT_ID", tenant),
+            ("CLIENT_ID", client_id),
+            ("CLIENT_SECRET", client_secret),
+            ("SHAREPOINT_SITE_URL", site_url),
+            ("SHAREPOINT_LIST_NAME", lista),
+        )
+        if not v
+    ]
+    if faltando:
+        print(f"ERRO: variaveis obrigatorias ausentes: {', '.join(faltando)}.")
         sys.exit(1)
 
     hoje = date.today()
@@ -134,7 +181,7 @@ def main() -> None:
         fim = _data_env("BACKFILL_END") or hoje
         print(f"Modo BACKFILL: de {inicio} ate {fim}")
     else:
-        inicio = hoje - timedelta(days=7)  # janela de folga p/ feriados/dias sem rodar
+        inicio = hoje - timedelta(days=7)
         fim = hoje
         print(f"Modo DIARIO: janela de {inicio} ate {fim}")
 
@@ -143,7 +190,14 @@ def main() -> None:
         print("Nenhuma cotacao retornada pelo BCB no periodo (fim de semana/feriado?).")
         return
 
-    ja_existem = datas_existentes(site_url, lista)
+    token = obter_token(tenant, client_id, client_secret)
+    sess = requests.Session()
+    sess.headers.update({"Authorization": f"Bearer {token}", "Accept": "application/json"})
+
+    site_id = resolver_site(sess, site_url)
+    list_id = resolver_lista(sess, site_id, lista)
+
+    ja_existem = datas_existentes(sess, site_id, list_id)
     print(f"{len(ja_existem)} data(s) ja na lista; {len(cotacoes)} no periodo do BCB.")
 
     novos = 0
@@ -151,7 +205,7 @@ def main() -> None:
         if cotacao["data"] in ja_existem:
             print(f"  = {cotacao['data']} ja existe, pulando.")
             continue
-        gravar_item(site_url, lista, cotacao)
+        gravar_item(sess, site_id, list_id, cotacao)
         print(f"  + {cotacao['data']} -> R$ {cotacao['valor']}")
         novos += 1
 
