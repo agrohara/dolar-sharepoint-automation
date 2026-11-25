@@ -122,12 +122,43 @@ def _normalizar_data(valor: str) -> str:
     return valor
 
 
+def _para_iso(data_ddmmyyyy: str) -> str:
+    """dd/mm/aaaa -> ISO 8601 (meio-dia UTC, para a data nao escorregar de dia)."""
+    d = datetime.strptime(data_ddmmyyyy, "%d/%m/%Y")
+    return d.strftime("%Y-%m-%dT12:00:00Z")
+
+
+def purgar_insercoes_do_dia(sess: requests.Session, site_id: str, list_id: str, dia: date) -> int:
+    """Remove itens cujo DataColeta e do dia informado (limpa tentativas parciais)."""
+    alvo = dia.strftime("%Y-%m-%d")
+    url = f"{GRAPH}/sites/{site_id}/lists/{list_id}/items"
+    params = {"$expand": "fields($select=DataColeta)", "$top": "5000"}
+    ids = []
+    while url:
+        resp = sess.get(url, params=params, timeout=120)
+        if resp.status_code != 200:
+            print(f"AVISO: falha ao listar para limpeza: {resp.status_code} {resp.text}")
+            return 0
+        corpo = resp.json()
+        for item in corpo.get("value", []):
+            dc = (item.get("fields") or {}).get("DataColeta")
+            if dc and str(dc)[:10] == alvo:
+                ids.append(item["id"])
+        url = corpo.get("@odata.nextLink")
+        params = None
+    for item_id in ids:
+        r = sess.delete(f"{GRAPH}/sites/{site_id}/lists/{list_id}/items/{item_id}", timeout=60)
+        if r.status_code not in (200, 204):
+            print(f"AVISO: falha ao remover item {item_id}: {r.status_code} {r.text}")
+    return len(ids)
+
+
 def gravar_item(sess: requests.Session, site_id: str, list_id: str, cotacao: dict) -> None:
     data_coleta = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     payload = {
         "fields": {
             "Title": f"Cotacao {cotacao['data']}",
-            "DataCotacao": cotacao["data"],
+            "DataCotacao": _para_iso(cotacao["data"]),
             "Valor": cotacao["valor"],
             "Fonte": FONTE,
             "DataColeta": data_coleta,
@@ -152,6 +183,18 @@ def _data_env(nome: str):
     except ValueError:
         print(f"ERRO: {nome}='{valor}' invalido. Use o formato YYYY-MM-DD.")
         sys.exit(1)
+
+
+def _data_env_opcional(nome: str):
+    """Como _data_env, mas nao sai do processo em caso de erro (uso em passos auxiliares)."""
+    valor = (os.environ.get(nome) or "").strip()
+    if not valor:
+        return None
+    try:
+        return datetime.strptime(valor, "%Y-%m-%d").date()
+    except ValueError:
+        print(f"AVISO: {nome}='{valor}' invalido (esperado YYYY-MM-DD); ignorando.")
+        return None
 
 
 def main() -> None:
@@ -196,6 +239,11 @@ def main() -> None:
 
     site_id = resolver_site(sess, site_url)
     list_id = resolver_lista(sess, site_id, lista)
+
+    purge_dia = _data_env_opcional("PURGE_DATACOLETA_DAY")
+    if purge_dia:
+        removidos = purgar_insercoes_do_dia(sess, site_id, list_id, purge_dia)
+        print(f"Limpeza: {removidos} item(ns) removido(s) com DataColeta de {purge_dia}.")
 
     ja_existem = datas_existentes(sess, site_id, list_id)
     print(f"{len(ja_existem)} data(s) ja na lista; {len(cotacoes)} no periodo do BCB.")
