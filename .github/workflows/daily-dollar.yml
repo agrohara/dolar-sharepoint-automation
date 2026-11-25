@@ -34,24 +34,13 @@ jobs:
         python -m pip install --upgrade pip
         pip install requests
 
-    - name: Instalar CLI Microsoft 365
-      run: npm install -g @pnp/cli-microsoft365
-
-    - name: Login no Microsoft 365
-      env:
-        CLIENT_ID: ${{ secrets.CLIENT_ID }}
-        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
-        TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
-      run: m365 login --authType secret --appId "$CLIENT_ID" --tenant "$TENANT_ID" --secret "$CLIENT_SECRET"
-
     - name: Executar script de cotação
       env:
+        TENANT_ID: 044e0a4a-8936-4daa-becf-e0597208071c
+        CLIENT_ID: ${{ secrets.CLIENT_ID }}
+        CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         SHAREPOINT_SITE_URL: ${{ secrets.SHAREPOINT_SITE_URL }}
         SHAREPOINT_LIST_NAME: ${{ secrets.SHAREPOINT_LIST_NAME }}
         BACKFILL_START: ${{ github.event.inputs.backfill_start }}
         BACKFILL_END: ${{ github.event.inputs.backfill_end }}
       run: python scripts/fetch_dollar.py
-
-    - name: Logout
-      if: always()
-      run: m365 logout
